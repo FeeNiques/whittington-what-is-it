@@ -1,0 +1,1328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Whittington — What Is It?</title>
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import { getFirestore, collection, addDoc, getDocs, query, orderBy, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+  import { getStorage, ref, uploadString, getDownloadURL } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js';
+
+  // ─── CONFIGURATION — fill these in ───────────────────────────────────────────
+  const ANTHROPIC_API_KEY = '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';
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyA2CYpqGrPh1geYD4vB5EIHSVaqyj5h_lc",
+    authDomain: "whittington-what-is-it.firebaseapp.com",
+    projectId: "whittington-what-is-it",
+    storageBucket: "whittington-what-is-it.firebasestorage.app",
+    messagingSenderId: "492165153409",
+    appId: "1:492165153409:web:a3dea91945a1fb6b448380",
+    measurementId: "G-9C3YZPVHY0"
+  };
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const storage = getStorage(app);
+
+  // ── System prompt ────────────────────────────────────────────────────────────
+  const SYSTEM_PROMPT = `You are a knowledgeable naturalist and field guide assistant for the Whittington family — a curious, outdoorsy family from Southern Indiana with bird feeders, wooded property, and a love of nature. One member works on small engines. They travel and explore beyond home regularly.
+
+Your job is to identify what is in the photo and tell an engaging, honest story about it.
+
+LOCATION CONTEXT: The user message will include the location where the photo was taken when GPS is available. Use that location to tailor your response — local species names, regional seasonality, what is typical or unusual for that area. If no location is provided, default to Southern Indiana context.
+
+HISTORICAL CONTEXT: The user message may include nearby Wikipedia articles or points of interest within walking distance of where the photo was taken. If that information is present and relevant, weave it naturally into your response — a brief mention of what they are standing near can make an ordinary moment feel extraordinary. Do not force it if it is not relevant to the subject.
+
+IDENTIFICATION RULES:
+- Always describe the specific visual features that led to your identification (coloring, shape, markings, texture, size cues) so the user can agree or challenge your reasoning.
+- If you are uncertain, say so clearly. Use language like "This appears to be..." or "Based on the [feature], this is most likely..." — never confidently assert an ID you are not sure of.
+- If the image is too blurry, too dark, or the subject is not clearly visible, say so and ask for a better photo rather than guessing.
+- If multiple species are plausible, name your top 1-2 and explain what would distinguish them in person.
+
+RESPONSE FORMAT — always use this exact structure:
+
+**What I See:** [2-3 sentences describing what you observe in the image and the key features you are working from]
+
+**Identification:** [Your best ID with confidence level: Confident / Likely / Uncertain]
+
+**The Story:** [3-5 sentences of genuinely interesting natural history, behavior, folklore, or practical knowledge relevant to where the photo was taken. Make this feel like something worth sharing — not a textbook entry.]
+
+**Local Notes:** [1-2 sentences about this species or object specifically in the region where the photo was taken — seasonality, local abundance, any quirks relevant to that area. If historical context was provided and is interesting, you may mention it briefly here instead.]
+
+**Ask Me More:** [Share one additional surprising or little-known fact about this subject that did not fit above, then suggest one specific thing to look for or listen for next time they encounter it. Do not ask the user any questions about their intentions or what they want to do with the information.]
+
+SUBJECT AREAS — you are knowledgeable about all of these:
+- Birds (feeder birds, woodland species, raptors, waterfowl — regionally appropriate to the location)
+- Plants, wildflowers, berries, trees, fungi (note edibility and toxicity clearly and conservatively — when in doubt, warn)
+- Insects, spiders, reptiles, amphibians
+- Rocks, minerals, soil formations, geology
+- Small engine components, tools, mechanical parts
+- Historical markers, architecture, landmarks
+- Anything else a curious person might encounter while exploring
+
+TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know everything about nature and local history. Not academic. Not a customer service bot. This is a family tool built with love — match that energy.`;
+
+  // ── State ─────────────────────────────────────────────────────────────────────
+  let currentUser = null;
+  let currentImageBase64 = null;
+  let currentImageMime = null;
+  let conversationHistory = [];
+  let currentLocation = null;
+  let mapInstance = null;
+  let mapMarkers = [];
+  let allSightings = [];
+
+  // ── DOM refs ──────────────────────────────────────────────────────────────────
+  const screens = {
+    userSelect: document.getElementById('screen-user-select'),
+    main: document.getElementById('screen-main')
+  };
+
+  // ── GPS ───────────────────────────────────────────────────────────────────────
+  function getLocation() {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) { resolve(null); return; }
+      navigator.geolocation.getCurrentPosition(
+        pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        () => resolve(null),
+        { timeout: 8000 }
+      );
+    });
+  }
+
+  // ── Reverse geocode: coordinates to human-readable region (Nominatim, free) ──
+  async function reverseGeocode(lat, lng) {
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+        { headers: { 'Accept-Language': 'en' } }
+      );
+      const data = await res.json();
+      const a = data.address || {};
+      const city = a.city || a.town || a.village || a.hamlet || a.county || '';
+      const state = a.state || '';
+      const country = a.country_code === 'us' ? '' : (a.country || '');
+      return [city, state, country].filter(Boolean).join(', ') || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Wikipedia geosearch: nearby articles within ~300m (~1000ft) radius ───────
+  async function getNearbyHistory(lat, lng) {
+    try {
+      const radius = 300;
+      const url = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lng}&gsradius=${radius}&gslimit=5&format=json&origin=*`;
+      const res = await fetch(url);
+      const data = await res.json();
+      const pages = data && data.query && data.query.geosearch ? data.query.geosearch : [];
+      if (pages.length === 0) return null;
+
+      const top = pages.slice(0, 3);
+      const extracts = await Promise.all(top.map(async (page) => {
+        try {
+          const eUrl = `https://en.wikipedia.org/w/api.php?action=query&pageids=${page.pageid}&prop=extracts&exintro=true&exsentences=2&explaintext=true&format=json&origin=*`;
+          const eRes = await fetch(eUrl);
+          const eData = await eRes.json();
+          const extract = eData && eData.query && eData.query.pages && eData.query.pages[page.pageid]
+            ? eData.query.pages[page.pageid].extract || '' : '';
+          if (!extract) return null;
+          return `- ${page.title} (${Math.round(page.dist)}m away): ${extract.trim()}`;
+        } catch {
+          return `- ${page.title} (${Math.round(page.dist)}m away)`;
+        }
+      }));
+
+      const valid = extracts.filter(Boolean);
+      return valid.length > 0 ? valid.join('\n') : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── API call ──────────────────────────────────────────────────────────────────
+  async function callClaude(userMessage, imageBase64, imageMime) {
+    const userContent = [];
+
+    if (imageBase64 && imageMime) {
+      userContent.push({
+        type: 'image',
+        source: { type: 'base64', media_type: imageMime, data: imageBase64 }
+      });
+    }
+    userContent.push({ type: 'text', text: userMessage });
+
+    const messages = [...conversationHistory, { role: 'user', content: userContent }];
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1200,
+        system: SYSTEM_PROMPT,
+        messages
+      })
+    });
+
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error?.message || 'API error');
+    }
+
+    const data = await response.json();
+    const assistantText = data.content.find(b => b.type === 'text')?.text || '';
+
+    // Append to conversation history (store image only on first turn)
+    conversationHistory.push({ role: 'user', content: userContent });
+    conversationHistory.push({ role: 'assistant', content: assistantText });
+
+    return assistantText;
+  }
+
+  // ── Upload image to Firebase Storage ─────────────────────────────────────────
+  async function uploadImage(base64, mime) {
+    const ext = mime.split('/')[1] || 'jpg';
+    const filename = `sightings/${Date.now()}_${currentUser}.${ext}`;
+    const storageRef = ref(storage, filename);
+    await uploadString(storageRef, base64, 'base64', { contentType: mime });
+    return await getDownloadURL(storageRef);
+  }
+
+  // ── Save sighting to Firestore ────────────────────────────────────────────────
+  async function saveSighting(imageUrl, aiResponse, location, regionLabel) {
+    const coordLabel = location ? `${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}` : null;
+    const doc = {
+      user: currentUser,
+      imageUrl,
+      aiResponse,
+      location: location || null,
+      timestamp: new Date().toISOString(),
+      locationLabel: regionLabel || coordLabel || 'Location unavailable',
+      coordLabel: coordLabel || null
+    };
+    await addDoc(collection(db, 'sightings'), doc);
+    return doc;
+  }
+
+  // ── Load feed ─────────────────────────────────────────────────────────────────
+  function loadFeed() {
+    const q = query(collection(db, 'sightings'), orderBy('timestamp', 'desc'));
+    onSnapshot(q, (snapshot) => {
+      allSightings = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      renderFeed();
+      if (document.getElementById('tab-map').classList.contains('active')) {
+        renderMap();
+      }
+    });
+  }
+
+  function renderFeed() {
+    const brandon = allSightings.filter(s => s.user === 'Brandon');
+    const scott = allSightings.filter(s => s.user === 'Scott');
+    const wendy = allSightings.filter(s => s.user === 'Wendy');
+
+    [['Brandon', brandon], ['Scott', scott], ['Wendy', wendy]].forEach(([user, list]) => {
+      const container = document.getElementById(`feed-${user.toLowerCase()}`);
+      if (!container) return;
+      container.innerHTML = list.length === 0
+        ? '<p class="feed-empty">Nothing shared yet.</p>'
+        : list.map(s => feedCard(s)).join('');
+    });
+  }
+
+  function feedCard(s) {
+    const date = new Date(s.timestamp).toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: 'numeric', minute: '2-digit'
+    });
+    const firstLine = s.aiResponse?.split('\n')[0] || 'View identification';
+    const mapsUrl = s.location
+      ? `https://maps.apple.com/?ll=${s.location.lat},${s.location.lng}&z=15`
+      : null;
+
+    const tagHint = Object.keys({Brandon:1,Scott:1,Wendy:1})
+      .filter(n => n !== currentUser)
+      .map(n => `@${n}`)
+      .join(', ');
+
+    return `
+    <div class="feed-card">
+      <img class="feed-img" src="${s.imageUrl}" alt="Sighting" loading="lazy" />
+      <div class="feed-meta">
+        <span class="feed-date">${date}</span>
+        ${mapsUrl ? `<a class="feed-loc" href="${mapsUrl}" target="_blank">📍 ${s.locationLabel}</a>` : `<span class="feed-loc-plain">📍 ${s.locationLabel}</span>`}
+      </div>
+      <div class="feed-response collapsed" id="resp-${s.id}">
+        <div class="feed-preview">${firstLine}</div>
+        <div class="feed-full">${formatResponse(s.aiResponse)}</div>
+      </div>
+      <button class="feed-expand-btn" onclick="toggleCard('${s.id}')">Show identification ▾</button>
+      <button class="comment-toggle-btn" id="comment-toggle-${s.id}" onclick="toggleComments('${s.id}')">Comments ▾</button>
+      <div class="comment-section" id="comment-section-${s.id}" style="display:none;">
+        <div class="comments-list" id="comments-${s.id}">
+          <p class="no-comments">No comments yet.</p>
+        </div>
+        <div class="comment-input-row">
+          <input
+            type="text"
+            class="comment-input"
+            id="comment-input-${s.id}"
+            placeholder="Add a comment... (try ${tagHint})"
+            onkeydown="handleCommentKey(event, '${s.id}')"
+          />
+          <button class="comment-post-btn" id="comment-btn-${s.id}" onclick="postComment('${s.id}')">Post</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  window.toggleCard = function(id) {
+    const el = document.getElementById(`resp-${id}`);
+    const btn = el.nextElementSibling;
+    if (el.classList.contains('collapsed')) {
+      el.classList.remove('collapsed');
+      btn.textContent = 'Hide ▴';
+    } else {
+      el.classList.add('collapsed');
+      btn.textContent = 'Show identification ▾';
+    }
+  };
+
+  function formatResponse(text) {
+    if (!text) return '';
+    return text
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\n/g, '<br>');
+  }
+
+  // ── Comments ─────────────────────────────────────────────────────────────────
+  const USER_COLORS = {
+    Brandon: '#7BA05B',
+    Scott: '#C4873A',
+    Wendy: '#8B5E8B'
+  };
+
+  function formatComment(text) {
+    // Render @Name tags as colored badges
+    return text.replace(/@(Brandon|Scott|Wendy)/g, (match, name) => {
+      const color = USER_COLORS[name] || '#9B9B8A';
+      return `<span style="background:${color};color:${name === 'Brandon' ? '#1C2B1A' : '#F5F0E8'};padding:1px 7px;border-radius:10px;font-size:0.82rem;font-weight:600;">${match}</span>`;
+    });
+  }
+
+  async function loadComments(sightingId) {
+    const container = document.getElementById(`comments-${sightingId}`);
+    if (!container) return;
+    const q = query(
+      collection(db, 'sightings', sightingId, 'comments'),
+      orderBy('timestamp', 'asc')
+    );
+    onSnapshot(q, (snapshot) => {
+      const comments = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      renderComments(sightingId, comments);
+    });
+  }
+
+  function renderComments(sightingId, comments) {
+    const container = document.getElementById(`comments-${sightingId}`);
+    if (!container) return;
+    if (comments.length === 0) {
+      container.innerHTML = '<p class="no-comments">No comments yet.</p>';
+      return;
+    }
+    container.innerHTML = comments.map(c => {
+      const color = USER_COLORS[c.user] || '#9B9B8A';
+      const textColor = c.user === 'Brandon' ? '#1C2B1A' : '#F5F0E8';
+      const time = c.timestamp?.toDate
+        ? c.timestamp.toDate().toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+        : 'just now';
+      return `<div class="comment-item">
+        <span class="comment-author" style="background:${color};color:${textColor}">${c.user}</span>
+        <span class="comment-time">${time}</span>
+        <div class="comment-text">${formatComment(c.text)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  window.postComment = async function(sightingId) {
+    const input = document.getElementById(`comment-input-${sightingId}`);
+    const text = input.value.trim();
+    if (!text) return;
+    const btn = document.getElementById(`comment-btn-${sightingId}`);
+    btn.disabled = true;
+    btn.textContent = '...';
+    try {
+      await addDoc(collection(db, 'sightings', sightingId, 'comments'), {
+        user: currentUser,
+        text,
+        timestamp: serverTimestamp()
+      });
+      input.value = '';
+    } catch (err) {
+      console.error('Comment error:', err);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Post';
+  };
+
+  window.handleCommentKey = function(e, sightingId) {
+    if (e.key === 'Enter') window.postComment(sightingId);
+  };
+
+  window.toggleComments = function(sightingId) {
+    const section = document.getElementById(`comment-section-${sightingId}`);
+    const btn = document.getElementById(`comment-toggle-${sightingId}`);
+    if (section.style.display === 'none' || section.style.display === '') {
+      section.style.display = 'block';
+      btn.textContent = 'Hide comments ▴';
+      loadComments(sightingId);
+    } else {
+      section.style.display = 'none';
+      btn.textContent = 'Comments ▾';
+    }
+  };
+
+  // ── Map ───────────────────────────────────────────────────────────────────────
+  function initMap() {
+    if (mapInstance) return;
+    mapInstance = L.map('map-container').setView([38.5, -86.2], 9);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(mapInstance);
+  }
+
+  function renderMap() {
+    if (!mapInstance) initMap();
+    mapMarkers.forEach(m => m.remove());
+    mapMarkers = [];
+
+    const withLocation = allSightings.filter(s => s.location);
+    withLocation.forEach(s => {
+      const color = s.user === 'Brandon' ? '#7BA05B' : s.user === 'Scott' ? '#C4873A' : '#8B5E8B';
+      const icon = L.divIcon({
+        html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #F5F0E8;box-shadow:0 1px 4px rgba(0,0,0,0.4)"></div>`,
+        className: '',
+        iconSize: [14, 14],
+        iconAnchor: [7, 7]
+      });
+      const marker = L.marker([s.location.lat, s.location.lng], { icon }).addTo(mapInstance);
+      const date = new Date(s.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const firstLine = s.aiResponse?.split('\n')[0] || 'Sighting';
+      marker.bindPopup(`<strong>${s.user}</strong><br>${date}<br><em>${firstLine}</em>`);
+      mapMarkers.push(marker);
+    });
+
+    if (withLocation.length > 0) {
+      const bounds = L.latLngBounds(withLocation.map(s => [s.location.lat, s.location.lng]));
+      mapInstance.fitBounds(bounds, { padding: [30, 30] });
+    }
+
+    setTimeout(() => mapInstance.invalidateSize(), 100);
+  }
+
+  // ── Tab switching ─────────────────────────────────────────────────────────────
+  window.switchTab = function(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById(`tab-${tab}`).classList.add('active');
+    document.getElementById(`panel-${tab}`).classList.add('active');
+    if (tab === 'map') renderMap();
+  };
+
+  window.switchFeedUser = function(user) {
+    document.querySelectorAll('.feed-tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.feed-user-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById(`feed-tab-${user}`).classList.add('active');
+    document.getElementById(`feed-${user}`).classList.add('active');
+  };
+
+  // ── Image input ───────────────────────────────────────────────────────────────
+  window.triggerCamera = function() {
+    document.getElementById('camera-input').click();
+  };
+
+  window.handleImageSelect = function(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target.result;
+      const [header, b64] = dataUrl.split(',');
+      const mime = header.match(/:(.*?);/)[1];
+      currentImageBase64 = b64;
+      currentImageMime = mime;
+      conversationHistory = [];
+
+      document.getElementById('preview-img').src = dataUrl;
+      document.getElementById('preview-section').style.display = 'block';
+      document.getElementById('response-section').style.display = 'none';
+      document.getElementById('followup-section').style.display = 'none';
+      document.getElementById('identify-btn').style.display = 'flex';
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // ── Identify ──────────────────────────────────────────────────────────────────
+  window.identify = async function() {
+    if (!currentImageBase64) return;
+
+    const btn = document.getElementById('identify-btn');
+    const responseEl = document.getElementById('response-text');
+    const responseSection = document.getElementById('response-section');
+    const followupSection = document.getElementById('followup-section');
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Identifying...';
+    responseSection.style.display = 'none';
+
+    try {
+      // Run GPS, reverse geocode, and Wikipedia lookup in parallel for zero added wait
+      currentLocation = await getLocation();
+
+      let regionLabel = null;
+      let nearbyHistory = null;
+
+      if (currentLocation) {
+        [regionLabel, nearbyHistory] = await Promise.all([
+          reverseGeocode(currentLocation.lat, currentLocation.lng),
+          getNearbyHistory(currentLocation.lat, currentLocation.lng)
+        ]);
+      }
+
+      // Build enriched prompt with location and history context
+      let prompt = 'Please identify what is in this photo.';
+      if (regionLabel) {
+        prompt += `\n\nLocation where this photo was taken: ${regionLabel}.`;
+      }
+      if (nearbyHistory) {
+        prompt += `\n\nNearby Wikipedia articles within walking distance:\n${nearbyHistory}`;
+      }
+
+      const response = await callClaude(prompt, currentImageBase64, currentImageMime);
+
+      responseEl.innerHTML = formatResponse(response);
+      responseSection.style.display = 'block';
+      followupSection.style.display = 'flex';
+
+      // Auto-save to Firebase
+      try {
+        const imgUrl = await uploadImage(currentImageBase64, currentImageMime);
+        await saveSighting(imgUrl, response, currentLocation, regionLabel);
+        showToast('Saved to your feed');
+      } catch (saveErr) {
+        console.error('Save error:', saveErr);
+        showToast('Identified — could not save to feed', true);
+      }
+
+    } catch (err) {
+      responseEl.innerHTML = `<span style="color:#C4873A">Something went wrong: ${err.message}</span>`;
+      responseSection.style.display = 'block';
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = '🔍 Identify';
+    btn.style.display = 'flex';
+  };
+
+  // ── Follow-up ─────────────────────────────────────────────────────────────────
+  window.sendFollowup = async function() {
+    const input = document.getElementById('followup-input');
+    const question = input.value.trim();
+    if (!question) return;
+
+    const responseEl = document.getElementById('response-text');
+    const btn = document.getElementById('followup-btn');
+
+    input.value = '';
+    btn.disabled = true;
+    btn.textContent = '...';
+
+    try {
+      // Follow-up sends no image — conversation history carries context
+      const response = await callClaude(question, null, null);
+      responseEl.innerHTML += `<div class="followup-block"><div class="followup-q">You: ${question}</div><div class="followup-a">${formatResponse(response)}</div></div>`;
+      responseEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    } catch (err) {
+      responseEl.innerHTML += `<div class="followup-block" style="color:#C4873A">Error: ${err.message}</div>`;
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Ask';
+  };
+
+  window.handleFollowupKey = function(e) {
+    if (e.key === 'Enter') window.sendFollowup();
+  };
+
+  // ── Toast ─────────────────────────────────────────────────────────────────────
+  function showToast(msg, isError = false) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.background = isError ? '#C4873A' : '#7BA05B';
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2800);
+  }
+
+  // ── User selection ────────────────────────────────────────────────────────────
+  window.selectUser = function(user) {
+    currentUser = user;
+    document.getElementById('screen-user-select').style.display = 'none';
+    document.getElementById('screen-main').style.display = 'flex';
+    document.getElementById('current-user-label').textContent = user;
+    loadFeed();
+  };
+
+  // ── New photo ────────────────────────────────────────────────────────────────
+  window.newPhoto = function() {
+    currentImageBase64 = null;
+    currentImageMime = null;
+    conversationHistory = [];
+    document.getElementById('preview-section').style.display = 'none';
+    document.getElementById('response-section').style.display = 'none';
+    document.getElementById('followup-section').style.display = 'none';
+    document.getElementById('identify-btn').style.display = 'none';
+    document.getElementById('camera-input').value = '';
+  };
+
+</script>
+
+<!-- Leaflet for map -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+
+<!-- Google Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --forest:   #1C2B1A;
+    --cream:    #F5F0E8;
+    --green:    #7BA05B;
+    --rust:     #C4873A;
+    --plum:     #8B5E8B;
+    --bark:     #2E1B0E;
+    --muted:    #9B9B8A;
+    --card-bg:  #243022;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--forest);
+    color: var(--cream);
+    font-family: 'Inter', sans-serif;
+    font-size: 17px;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+  }
+
+  /* ── User Select Screen ─────────────────────────────────── */
+  #screen-user-select {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100dvh;
+    padding: 32px 24px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .compass-bg {
+    position: absolute;
+    width: 280px;
+    height: 280px;
+    opacity: 0.06;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -60%);
+    animation: slowspin 60s linear infinite;
+  }
+
+  @keyframes slowspin { to { transform: translate(-50%, -60%) rotate(360deg); } }
+
+  .app-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 2rem;
+    line-height: 1.15;
+    color: var(--cream);
+    margin-bottom: 6px;
+    position: relative;
+  }
+
+  .app-subtitle {
+    font-size: 0.85rem;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 48px;
+    position: relative;
+  }
+
+  .who-label {
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin-bottom: 20px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .user-btns {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    width: 100%;
+    max-width: 280px;
+    position: relative;
+  }
+
+  .user-btn {
+    padding: 20px;
+    border-radius: 14px;
+    border: none;
+    font-family: 'Playfair Display', serif;
+    font-size: 1.25rem;
+    cursor: pointer;
+    transition: transform 0.15s, opacity 0.15s;
+  }
+
+  .user-btn:active { transform: scale(0.97); opacity: 0.85; }
+  .user-btn.brandon { background: var(--green); color: var(--forest); }
+  .user-btn.scott { background: var(--rust); color: var(--cream); }
+  .user-btn.wendy { background: var(--plum); color: var(--cream); }
+
+  .user-btn .user-icon { font-size: 1.6rem; display: block; margin-bottom: 4px; }
+
+  /* ── Main Screen ─────────────────────────────────────────── */
+  #screen-main {
+    display: none;
+    flex-direction: column;
+    height: 100dvh;
+  }
+
+  .top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 18px 8px;
+    border-bottom: 1px solid rgba(245,240,232,0.08);
+    flex-shrink: 0;
+  }
+
+  .top-bar-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.1rem;
+    color: var(--cream);
+  }
+
+  .user-badge {
+    font-size: 0.78rem;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+
+  .user-badge.brandon { background: var(--green); color: var(--forest); }
+  .user-badge.scott { background: var(--rust); color: var(--cream); }
+  .user-badge.wendy { background: var(--plum); color: var(--cream); }
+
+  /* ── Tabs ─────────────────────────────────────────────────── */
+  .tab-bar {
+    display: flex;
+    border-bottom: 1px solid rgba(245,240,232,0.08);
+    flex-shrink: 0;
+  }
+
+  .tab-btn {
+    flex: 1;
+    padding: 13px 8px;
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-family: 'Inter', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.2s, border-color 0.2s;
+  }
+
+  .tab-btn.active { color: var(--cream); border-bottom-color: var(--green); }
+
+  .tab-panel { display: none; flex: 1; overflow-y: auto; }
+  .tab-panel.active { display: flex; flex-direction: column; }
+
+  /* ── Camera Panel ─────────────────────────────────────────── */
+  #panel-camera {
+    padding: 20px 18px 32px;
+    gap: 16px;
+  }
+
+  .camera-zone {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed rgba(123,160,91,0.35);
+    border-radius: 18px;
+    min-height: 200px;
+    cursor: pointer;
+    background: var(--card-bg);
+    transition: border-color 0.2s;
+    overflow: hidden;
+  }
+
+  .camera-zone:active { border-color: var(--green); }
+
+  .camera-compass {
+    position: absolute;
+    width: 120px;
+    height: 120px;
+    opacity: 0.07;
+    animation: slowspin 80s linear infinite;
+  }
+
+  .camera-icon { font-size: 3rem; margin-bottom: 10px; position: relative; }
+  .camera-hint { font-size: 0.85rem; color: var(--muted); position: relative; }
+
+  #preview-section { display: none; }
+  #preview-img {
+    width: 100%;
+    border-radius: 14px;
+    display: block;
+  }
+
+  .new-photo-btn {
+    background: none;
+    border: 1px solid rgba(245,240,232,0.2);
+    color: var(--muted);
+    padding: 10px;
+    border-radius: 10px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-align: center;
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  #identify-btn {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    padding: 18px;
+    background: var(--green);
+    color: var(--forest);
+    border: none;
+    border-radius: 14px;
+    font-family: 'Inter', sans-serif;
+    font-size: 1.05rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.15s;
+  }
+
+  #identify-btn:active { transform: scale(0.98); opacity: 0.85; }
+  #identify-btn:disabled { opacity: 0.55; }
+
+  .spinner {
+    width: 18px; height: 18px;
+    border: 2px solid rgba(28,43,26,0.3);
+    border-top-color: var(--forest);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: inline-block;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #response-section { display: none; }
+
+  .response-card {
+    background: var(--card-bg);
+    border-radius: 14px;
+    padding: 18px;
+    border: 1px solid rgba(123,160,91,0.2);
+  }
+
+  .response-label {
+    font-size: 0.75rem;
+    color: var(--green);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  #response-text {
+    font-size: 0.95rem;
+    line-height: 1.65;
+    color: var(--cream);
+  }
+
+  #response-text strong { color: var(--green); }
+
+  .followup-block {
+    margin-top: 18px;
+    padding-top: 18px;
+    border-top: 1px solid rgba(245,240,232,0.08);
+  }
+
+  .followup-q {
+    font-size: 0.85rem;
+    color: var(--rust);
+    margin-bottom: 8px;
+    font-weight: 500;
+  }
+
+  .followup-a { font-size: 0.95rem; line-height: 1.65; }
+
+  #followup-section {
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .followup-row {
+    display: flex;
+    gap: 10px;
+  }
+
+  #followup-input {
+    flex: 1;
+    background: var(--card-bg);
+    border: 1px solid rgba(245,240,232,0.15);
+    border-radius: 12px;
+    color: var(--cream);
+    font-family: 'Inter', sans-serif;
+    font-size: 0.95rem;
+    padding: 13px 14px;
+    outline: none;
+  }
+
+  #followup-input:focus { border-color: var(--green); }
+  #followup-input::placeholder { color: var(--muted); }
+
+  #followup-btn {
+    background: var(--green);
+    color: var(--forest);
+    border: none;
+    border-radius: 12px;
+    padding: 13px 20px;
+    font-weight: 600;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+
+  #followup-btn:disabled { opacity: 0.5; }
+
+  input[type="file"] { display: none; }
+
+  /* ── Feed Panel ───────────────────────────────────────────── */
+  #panel-feed { padding: 0; }
+
+  .feed-sub-tabs {
+    display: flex;
+    border-bottom: 1px solid rgba(245,240,232,0.08);
+    flex-shrink: 0;
+  }
+
+  .feed-tab-btn {
+    flex: 1;
+    padding: 14px;
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+
+  .feed-tab-btn.active { color: var(--cream); border-bottom-color: var(--rust); }
+
+  .feed-user-panel { display: none; padding: 16px 18px 32px; gap: 16px; flex-direction: column; overflow-y: auto; flex: 1; }
+  .feed-user-panel.active { display: flex; }
+
+  .feed-empty { color: var(--muted); font-size: 0.9rem; text-align: center; padding: 32px 0; }
+
+  .feed-card {
+    background: var(--card-bg);
+    border-radius: 14px;
+    overflow: hidden;
+    border: 1px solid rgba(245,240,232,0.07);
+  }
+
+  .feed-img {
+    width: 100%;
+    height: 200px;
+    object-fit: cover;
+    display: block;
+  }
+
+  .feed-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 10px 14px 6px;
+  }
+
+  .feed-date { font-size: 0.78rem; color: var(--muted); }
+  .feed-loc { font-size: 0.78rem; color: var(--green); text-decoration: none; }
+  .feed-loc-plain { font-size: 0.78rem; color: var(--muted); }
+
+  .feed-response {
+    padding: 0 14px;
+    font-size: 0.88rem;
+    line-height: 1.6;
+    color: var(--cream);
+    overflow: hidden;
+  }
+
+  .feed-response.collapsed .feed-full { display: none; }
+  .feed-response.collapsed .feed-preview { padding: 8px 0; color: var(--muted); font-style: italic; }
+  .feed-preview { display: none; }
+  .feed-response:not(.collapsed) .feed-preview { display: none; }
+  .feed-response:not(.collapsed) .feed-full { padding: 10px 0; }
+  .feed-response.collapsed .feed-preview { display: block; }
+
+  .feed-expand-btn {
+    width: 100%;
+    background: none;
+    border: none;
+    border-top: 1px solid rgba(245,240,232,0.07);
+    color: var(--green);
+    font-size: 0.82rem;
+    padding: 12px;
+    cursor: pointer;
+    font-weight: 500;
+    text-align: center;
+  }
+
+  /* ── Map Panel ─────────────────────────────────────────────── */
+  #panel-map { padding: 0; position: relative; }
+  #map-container { width: 100%; flex: 1; min-height: 300px; }
+
+  .map-legend {
+    display: flex;
+    gap: 18px;
+    padding: 10px 18px;
+    background: var(--card-bg);
+    font-size: 0.8rem;
+    flex-shrink: 0;
+    border-top: 1px solid rgba(245,240,232,0.08);
+  }
+
+  .legend-dot {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+
+  /* ── Comments ───────────────────────────────────────────── */
+  .comment-toggle-btn {
+    width: 100%;
+    background: none;
+    border: none;
+    border-top: 1px solid rgba(245,240,232,0.07);
+    color: var(--muted);
+    font-size: 0.82rem;
+    padding: 11px;
+    cursor: pointer;
+    font-weight: 500;
+    text-align: center;
+    transition: color 0.2s;
+  }
+
+  .comment-toggle-btn:hover { color: var(--cream); }
+
+  .comment-section {
+    padding: 12px 14px 14px;
+    border-top: 1px solid rgba(245,240,232,0.07);
+    background: rgba(0,0,0,0.15);
+  }
+
+  .comments-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .no-comments {
+    font-size: 0.82rem;
+    color: var(--muted);
+    text-align: center;
+    padding: 8px 0;
+  }
+
+  .comment-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .comment-author {
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    flex-shrink: 0;
+  }
+
+  .comment-time {
+    font-size: 0.72rem;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+
+  .comment-text {
+    width: 100%;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    color: var(--cream);
+    padding-left: 2px;
+  }
+
+  .comment-input-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .comment-input {
+    flex: 1;
+    background: rgba(245,240,232,0.07);
+    border: 1px solid rgba(245,240,232,0.12);
+    border-radius: 10px;
+    color: var(--cream);
+    font-family: 'Inter', sans-serif;
+    font-size: 0.88rem;
+    padding: 10px 12px;
+    outline: none;
+  }
+
+  .comment-input:focus { border-color: var(--green); }
+  .comment-input::placeholder { color: var(--muted); font-size: 0.82rem; }
+
+  .comment-post-btn {
+    background: var(--green);
+    color: var(--forest);
+    border: none;
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-weight: 600;
+    font-size: 0.88rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .comment-post-btn:disabled { opacity: 0.5; }
+
+  /* ── Toast ─────────────────────────────────────────────────── */
+  #toast {
+    position: fixed;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--green);
+    color: var(--forest);
+    padding: 11px 22px;
+    border-radius: 24px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    opacity: 0;
+    transition: opacity 0.25s, transform 0.25s;
+    z-index: 999;
+    white-space: nowrap;
+  }
+
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* Leaflet popup override */
+  .leaflet-popup-content-wrapper {
+    background: var(--card-bg);
+    color: var(--cream);
+    border-radius: 10px;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.85rem;
+  }
+  .leaflet-popup-tip { background: var(--card-bg); }
+</style>
+</head>
+<body>
+
+<!-- ── User Select ────────────────────────────────────────────────── -->
+<div id="screen-user-select">
+  <svg class="compass-bg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="100" cy="100" r="95" fill="none" stroke="#F5F0E8" stroke-width="1"/>
+    <circle cx="100" cy="100" r="75" fill="none" stroke="#F5F0E8" stroke-width="0.5"/>
+    <circle cx="100" cy="100" r="55" fill="none" stroke="#F5F0E8" stroke-width="0.5"/>
+    <line x1="100" y1="5" x2="100" y2="195" stroke="#F5F0E8" stroke-width="0.5"/>
+    <line x1="5" y1="100" x2="195" y2="100" stroke="#F5F0E8" stroke-width="0.5"/>
+    <line x1="32" y1="32" x2="168" y2="168" stroke="#F5F0E8" stroke-width="0.3"/>
+    <line x1="168" y1="32" x2="32" y2="168" stroke="#F5F0E8" stroke-width="0.3"/>
+    <polygon points="100,10 94,100 100,90 106,100" fill="#F5F0E8"/>
+    <polygon points="100,190 94,100 100,110 106,100" fill="#F5F0E8" opacity="0.4"/>
+    <text x="100" y="28" text-anchor="middle" fill="#F5F0E8" font-size="12" font-family="Inter">N</text>
+    <text x="100" y="182" text-anchor="middle" fill="#F5F0E8" font-size="10" font-family="Inter" opacity="0.5">S</text>
+    <text x="178" y="105" text-anchor="middle" fill="#F5F0E8" font-size="10" font-family="Inter" opacity="0.5">E</text>
+    <text x="22" y="105" text-anchor="middle" fill="#F5F0E8" font-size="10" font-family="Inter" opacity="0.5">W</text>
+  </svg>
+
+  <h1 class="app-title">Whittington<br>What Is It?</h1>
+  <p class="app-subtitle">Southern Indiana Field Guide</p>
+  <p class="who-label">Who's exploring?</p>
+  <div class="user-btns">
+    <button class="user-btn brandon" onclick="selectUser('Brandon')">
+      <span class="user-icon">🌿</span>Brandon
+    </button>
+    <button class="user-btn scott" onclick="selectUser('Scott')">
+      <span class="user-icon">🔧</span>Scott
+    </button>
+    <button class="user-btn wendy" onclick="selectUser('Wendy')">
+      <span class="user-icon">🌸</span>Wendy
+    </button>
+  </div>
+</div>
+
+<!-- ── Main App ───────────────────────────────────────────────────── -->
+<div id="screen-main">
+
+  <div class="top-bar">
+    <span class="top-bar-title">Whittington — What Is It?</span>
+    <span class="user-badge" id="current-user-label"></span>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab-btn active" id="tab-camera" onclick="switchTab('camera')">📷 Identify</button>
+    <button class="tab-btn" id="tab-feed" onclick="switchTab('feed')">📋 Feed</button>
+    <button class="tab-btn" id="tab-map" onclick="switchTab('map')">🗺 Map</button>
+  </div>
+
+  <!-- Camera Panel -->
+  <div class="tab-panel active" id="panel-camera">
+
+    <div id="preview-section" style="display:none;">
+      <img id="preview-img" src="" alt="Selected photo" />
+      <button class="new-photo-btn" onclick="newPhoto()">↩ Choose different photo</button>
+    </div>
+
+    <div class="camera-zone" onclick="triggerCamera()" id="camera-zone-trigger">
+      <svg class="camera-compass" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="100" cy="100" r="95" fill="none" stroke="#F5F0E8" stroke-width="1.5"/>
+        <circle cx="100" cy="100" r="70" fill="none" stroke="#F5F0E8" stroke-width="0.8"/>
+        <line x1="100" y1="5" x2="100" y2="195" stroke="#F5F0E8" stroke-width="1"/>
+        <line x1="5" y1="100" x2="195" y2="100" stroke="#F5F0E8" stroke-width="1"/>
+        <line x1="32" y1="32" x2="168" y2="168" stroke="#F5F0E8" stroke-width="0.5"/>
+        <line x1="168" y1="32" x2="32" y2="168" stroke="#F5F0E8" stroke-width="0.5"/>
+        <polygon points="100,10 94,100 100,85 106,100" fill="#7BA05B"/>
+        <polygon points="100,190 94,100 100,115 106,100" fill="#F5F0E8" opacity="0.3"/>
+      </svg>
+      <span class="camera-icon">📷</span>
+      <span class="camera-hint">Tap to take or choose a photo</span>
+    </div>
+
+    <input type="file" id="camera-input" accept="image/*" capture="environment"
+           onchange="handleImageSelect(this)" />
+
+    <button id="identify-btn" onclick="identify()">🔍 Identify</button>
+
+    <div id="response-section">
+      <div class="response-card">
+        <div class="response-label">Identification</div>
+        <div id="response-text"></div>
+      </div>
+    </div>
+
+    <div id="followup-section" style="display:none;">
+      <div class="followup-row">
+        <input type="text" id="followup-input" placeholder="Ask a follow-up question..."
+               onkeydown="handleFollowupKey(event)" />
+        <button id="followup-btn" onclick="sendFollowup()">Ask</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Feed Panel -->
+  <div class="tab-panel" id="panel-feed">
+    <div class="feed-sub-tabs">
+      <button class="feed-tab-btn active" id="feed-tab-brandon" onclick="switchFeedUser('brandon')">🌿 Brandon</button>
+      <button class="feed-tab-btn" id="feed-tab-scott" onclick="switchFeedUser('scott')">🔧 Scott</button>
+      <button class="feed-tab-btn" id="feed-tab-wendy" onclick="switchFeedUser('wendy')">🌸 Wendy</button>
+    </div>
+    <div class="feed-user-panel active" id="feed-brandon">
+      <p class="feed-empty">Loading...</p>
+    </div>
+    <div class="feed-user-panel" id="feed-scott">
+      <p class="feed-empty">Loading...</p>
+    </div>
+    <div class="feed-user-panel" id="feed-wendy">
+      <p class="feed-empty">Loading...</p>
+    </div>
+  </div>
+
+  <!-- Map Panel -->
+  <div class="tab-panel" id="panel-map">
+    <div id="map-container"></div>
+    <div class="map-legend">
+      <span><span class="legend-dot" style="background:#7BA05B"></span>Brandon</span>
+      <span><span class="legend-dot" style="background:#C4873A"></span>Scott</span>
+      <span><span class="legend-dot" style="background:#8B5E8B"></span>Wendy</span>
+    </div>
+  </div>
+
+</div>
+
+<div id="toast"></div>
+
+<script>
+  // Handle user badge styling dynamically
+  const origSelectUser = window.selectUser;
+  window.selectUser = function(user) {
+    origSelectUser(user);
+    const badge = document.getElementById('current-user-label');
+    badge.className = 'user-badge ' + user.toLowerCase();
+  };
+
+  // Hide camera zone when preview is shown
+  const origHandleImageSelect = window.handleImageSelect;
+  window.handleImageSelect = function(input) {
+    origHandleImageSelect(input);
+    const cz = document.getElementById('camera-zone-trigger');
+    if (cz) cz.style.setProperty('display', 'none', 'important');
+  };
+
+  const origNewPhoto = window.newPhoto;
+  window.newPhoto = function() {
+    origNewPhoto();
+    document.getElementById('camera-zone-trigger').style.display = 'flex';
+  };
+</script>
+
+</body>
+</html>
