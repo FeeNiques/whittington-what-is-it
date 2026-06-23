@@ -33,7 +33,7 @@
   const auth = getAuth(app);
 
   // Build marker — check the browser console (F12) to confirm which version is live.
-  console.log('%cWhittington — What Is It?  build 2026-06-23c (login + Firestore photos + feed scroll fix)', 'color:#7BA05B;font-weight:bold');
+  console.log('%cWhittington — What Is It?  build 2026-06-23d (feed + identify scroll fix)', 'color:#7BA05B;font-weight:bold');
 
   // ── System prompt ────────────────────────────────────────────────────────────
   const SYSTEM_PROMPT = `You are a knowledgeable naturalist and field guide assistant for the Whittington family — a curious, outdoorsy family from Southern Indiana with bird feeders, wooded property, and a love of nature. One member works on small engines. They travel and explore beyond home regularly.
@@ -934,6 +934,9 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     gap: 16px;
   }
 
+  /* Keep each block at natural height so the panel scrolls instead of squishing content */
+  #panel-camera > * { flex-shrink: 0; }
+
   .camera-zone {
     position: relative;
     display: flex;
@@ -1129,6 +1132,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     border-radius: 14px;
     overflow: hidden;
     border: 1px solid rgba(245,240,232,0.07);
+    flex-shrink: 0;   /* keep natural height so the column overflows and scrolls instead of squishing cards */
   }
 
   .feed-img {
