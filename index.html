@@ -32,6 +32,9 @@
   const db = getFirestore(app);
   const auth = getAuth(app);
 
+  // Build marker — check the browser console (F12) to confirm which version is live.
+  console.log('%cWhittington — What Is It?  build 2026-06-23c (login + Firestore photos + feed scroll fix)', 'color:#7BA05B;font-weight:bold');
+
   // ── System prompt ────────────────────────────────────────────────────────────
   const SYSTEM_PROMPT = `You are a knowledgeable naturalist and field guide assistant for the Whittington family — a curious, outdoorsy family from Southern Indiana with bird feeders, wooded property, and a love of nature. One member works on small engines. They travel and explore beyond home regularly.
 
