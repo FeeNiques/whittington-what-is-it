@@ -1,7 +1,7 @@
 <!DOCTYPE html>
-<!-- saved from url=(0064)file:///C:/Users/Brandon/Downloads/whittington-what-is-it_3.html -->
-<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-
+<html lang="en">
+<head>
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -11,7 +11,8 @@
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
   import { getFirestore, collection, addDoc, getDocs, query, orderBy, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
-  import { getStorage, ref, uploadString, getDownloadURL } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js';
+  import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+  // Photos are shrunk in-browser and stored directly in Firestore (no Cloud Storage / Blaze plan needed).
 
   // ─── CONFIGURATION — fill these in ───────────────────────────────────────────
   // API key is stored securely in Cloudflare Worker -- not needed here
@@ -29,7 +30,7 @@
 
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
-  const storage = getStorage(app);
+  const auth = getAuth(app);
 
   // ── System prompt ────────────────────────────────────────────────────────────
   const SYSTEM_PROMPT = `You are a knowledgeable naturalist and field guide assistant for the Whittington family — a curious, outdoorsy family from Southern Indiana with bird feeders, wooded property, and a love of nature. One member works on small engines. They travel and explore beyond home regularly.
@@ -84,6 +85,57 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     userSelect: document.getElementById('screen-user-select'),
     main: document.getElementById('screen-main')
   };
+
+  // ── Auth ────────────────────────────────────────────────────────────────────
+  // Accounts are created by an admin in the Firebase console (Authentication >
+  // Users > Add user). There is intentionally no sign-up UI — only the three
+  // pre-created family accounts can sign in, and the Firestore/Storage rules
+  // additionally restrict access to an allow-list of those emails.
+  window.login = async function () {
+    const email = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errEl = document.getElementById('login-error');
+    const btn = document.getElementById('login-btn');
+    errEl.textContent = '';
+    if (!email || !password) { errEl.textContent = 'Enter your email and password.'; return; }
+    btn.disabled = true;
+    btn.textContent = 'Signing in...';
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      // onAuthStateChanged handles the screen swap on success.
+    } catch (err) {
+      errEl.textContent = 'Sign-in failed. Check your email and password.';
+      console.error('Auth error:', err.code || err.message);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
+  };
+
+  window.handleLoginKey = function (e) {
+    if (e.key === 'Enter') window.login();
+  };
+
+  window.logout = function () {
+    signOut(auth);
+  };
+
+  // Single source of truth for which screen is visible. Reacts to sign-in/out.
+  onAuthStateChanged(auth, (user) => {
+    const loginScreen = document.getElementById('screen-login');
+    const userSelect = document.getElementById('screen-user-select');
+    const main = document.getElementById('screen-main');
+    if (user) {
+      loginScreen.style.display = 'none';
+      main.style.display = 'none';
+      userSelect.style.display = 'flex';   // pick which family member you are
+      document.getElementById('login-password').value = '';
+    } else {
+      currentUser = null;
+      main.style.display = 'none';
+      userSelect.style.display = 'none';
+      loginScreen.style.display = 'flex';
+    }
+  });
 
   // ── GPS ───────────────────────────────────────────────────────────────────────
   function getLocation() {
@@ -190,13 +242,25 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     return assistantText;
   }
 
-  // ── Upload image to Firebase Storage ─────────────────────────────────────────
-  async function uploadImage(base64, mime) {
-    const ext = mime.split('/')[1] || 'jpg';
-    const filename = `sightings/${Date.now()}_${currentUser}.${ext}`;
-    const storageRef = ref(storage, filename);
-    await uploadString(storageRef, base64, 'base64', { contentType: mime });
-    return await getDownloadURL(storageRef);
+  // ── Shrink a photo to a small JPEG data URL for storage in Firestore ─────────
+  // Firestore caps a document at ~1 MB. We downscale to maxDim px and re-encode
+  // as JPEG so the stored image lands well under that (typically 100-300 KB).
+  function shrinkImage(dataUrl, maxDim = 1024, quality = 0.7) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if (w >= h && w > maxDim) { h = Math.round(h * maxDim / w); w = maxDim; }
+        else if (h > w && h > maxDim) { w = Math.round(w * maxDim / h); h = maxDim; }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));   // data: URL renders directly in <img>
+      };
+      img.onerror = reject;
+      img.src = dataUrl;
+    });
   }
 
   // ── Save sighting to Firestore ────────────────────────────────────────────────
@@ -204,6 +268,8 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     const coordLabel = location ? `${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}` : null;
     const doc = {
       user: currentUser,
+      authUid: auth.currentUser?.uid || null,
+      authEmail: auth.currentUser?.email || null,
       imageUrl,
       aiResponse,
       location: location || null,
@@ -246,7 +312,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
       month: 'short', day: 'numeric', year: 'numeric',
       hour: 'numeric', minute: '2-digit'
     });
-    const firstLine = s.aiResponse?.split('\n')[0] || 'View identification';
+    const firstLine = (s.aiResponse?.split('\n')[0] || 'View identification').replace(/\*\*/g, '');
     const mapsUrl = s.location
       ? `https://maps.apple.com/?ll=${s.location.lat},${s.location.lng}&z=15`
       : null;
@@ -469,6 +535,10 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
       document.getElementById('response-section').style.display = 'none';
       document.getElementById('followup-section').style.display = 'none';
       document.getElementById('identify-btn').style.display = 'flex';
+
+      // Hide the dashed camera zone while a preview is showing (folded in from old bottom script)
+      const cz = document.getElementById('camera-zone-trigger');
+      if (cz) cz.style.setProperty('display', 'none', 'important');
     };
     reader.readAsDataURL(file);
   };
@@ -515,10 +585,10 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
       responseSection.style.display = 'block';
       followupSection.style.display = 'flex';
 
-      // Auto-save to Firebase
+      // Auto-save to Firestore (photo shrunk and stored inline — no Cloud Storage)
       try {
-        const imgUrl = await uploadImage(currentImageBase64, currentImageMime);
-        await saveSighting(imgUrl, response, currentLocation, regionLabel);
+        const storedImage = await shrinkImage(`data:${currentImageMime};base64,${currentImageBase64}`);
+        await saveSighting(storedImage, response, currentLocation, regionLabel);
         showToast('Saved to your feed');
       } catch (saveErr) {
         console.error('Save error:', saveErr);
@@ -579,7 +649,9 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     currentUser = user;
     document.getElementById('screen-user-select').style.display = 'none';
     document.getElementById('screen-main').style.display = 'flex';
-    document.getElementById('current-user-label').textContent = user;
+    const badge = document.getElementById('current-user-label');
+    badge.textContent = user;
+    badge.className = 'user-badge ' + user.toLowerCase();   // (folded in from old bottom script)
     loadFeed();
   };
 
@@ -593,17 +665,19 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     document.getElementById('followup-section').style.display = 'none';
     document.getElementById('identify-btn').style.display = 'none';
     document.getElementById('camera-input').value = '';
+    // Restore the dashed camera zone (folded in from old bottom script)
+    document.getElementById('camera-zone-trigger').style.display = 'flex';
   };
 
 </script>
 
 <!-- Leaflet for map -->
-<link rel="stylesheet" href="./index_files/leaflet.min.css">
-<script src="./index_files/leaflet.min.js.download"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 
 <!-- Google Fonts -->
-<link rel="preconnect" href="https://fonts.googleapis.com/">
-<link href="./index_files/css2" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -707,6 +781,74 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 
   .user-btn .user-icon { font-size: 1.6rem; display: block; margin-bottom: 4px; }
 
+  /* ── Login Screen ───────────────────────────────────────── */
+  #screen-login {
+    display: none;            /* auth state listener reveals this */
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100dvh;
+    padding: 32px 24px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+    max-width: 300px;
+    margin-top: 24px;
+    position: relative;
+  }
+
+  .login-input {
+    background: var(--card-bg);
+    border: 1px solid rgba(245,240,232,0.15);
+    border-radius: 12px;
+    color: var(--cream);
+    font-family: 'Inter', sans-serif;
+    font-size: 1rem;
+    padding: 15px 16px;
+    outline: none;
+    width: 100%;
+  }
+
+  .login-input:focus { border-color: var(--green); }
+  .login-input::placeholder { color: var(--muted); }
+
+  .login-btn {
+    background: var(--green);
+    color: var(--forest);
+    border: none;
+    border-radius: 12px;
+    padding: 16px;
+    font-family: 'Inter', sans-serif;
+    font-size: 1.05rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 4px;
+    transition: opacity 0.2s, transform 0.15s;
+  }
+
+  .login-btn:active { transform: scale(0.98); opacity: 0.85; }
+  .login-btn:disabled { opacity: 0.55; }
+
+  .login-error {
+    color: var(--rust);
+    font-size: 0.85rem;
+    min-height: 1.1em;
+  }
+
+  .login-note {
+    color: var(--muted);
+    font-size: 0.78rem;
+    margin-top: 10px;
+    line-height: 1.4;
+  }
+
   /* ── Main Screen ─────────────────────────────────────────── */
   #screen-main {
     display: none;
@@ -740,6 +882,20 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
   .user-badge.brandon { background: var(--green); color: var(--forest); }
   .user-badge.scott { background: var(--rust); color: var(--cream); }
   .user-badge.wendy { background: var(--plum); color: var(--cream); }
+
+  .top-bar-right { display: flex; align-items: center; gap: 10px; }
+
+  .signout-btn {
+    background: none;
+    border: 1px solid rgba(245,240,232,0.2);
+    color: var(--muted);
+    font-family: 'Inter', sans-serif;
+    font-size: 0.72rem;
+    padding: 4px 10px;
+    border-radius: 20px;
+    cursor: pointer;
+  }
+  .signout-btn:active { opacity: 0.7; }
 
   /* ── Tabs ─────────────────────────────────────────────────── */
   .tab-bar {
@@ -1173,18 +1329,40 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 </head>
 <body>
 
-<!-- ── User Select ────────────────────────────────────────────────── -->
-<div id="screen-user-select">
+<!-- ── Login ──────────────────────────────────────────────────────── -->
+<div id="screen-login">
   <svg class="compass-bg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="100" cy="100" r="95" fill="none" stroke="#F5F0E8" stroke-width="1"></circle>
-    <circle cx="100" cy="100" r="75" fill="none" stroke="#F5F0E8" stroke-width="0.5"></circle>
-    <circle cx="100" cy="100" r="55" fill="none" stroke="#F5F0E8" stroke-width="0.5"></circle>
-    <line x1="100" y1="5" x2="100" y2="195" stroke="#F5F0E8" stroke-width="0.5"></line>
-    <line x1="5" y1="100" x2="195" y2="100" stroke="#F5F0E8" stroke-width="0.5"></line>
-    <line x1="32" y1="32" x2="168" y2="168" stroke="#F5F0E8" stroke-width="0.3"></line>
-    <line x1="168" y1="32" x2="32" y2="168" stroke="#F5F0E8" stroke-width="0.3"></line>
-    <polygon points="100,10 94,100 100,90 106,100" fill="#F5F0E8"></polygon>
-    <polygon points="100,190 94,100 100,110 106,100" fill="#F5F0E8" opacity="0.4"></polygon>
+    <circle cx="100" cy="100" r="95" fill="none" stroke="#F5F0E8" stroke-width="1"/>
+    <circle cx="100" cy="100" r="75" fill="none" stroke="#F5F0E8" stroke-width="0.5"/>
+    <line x1="100" y1="5" x2="100" y2="195" stroke="#F5F0E8" stroke-width="0.5"/>
+    <line x1="5" y1="100" x2="195" y2="100" stroke="#F5F0E8" stroke-width="0.5"/>
+    <polygon points="100,10 94,100 100,90 106,100" fill="#F5F0E8"/>
+  </svg>
+  <h1 class="app-title">Whittington<br>What Is It?</h1>
+  <p class="app-subtitle">Family sign-in</p>
+  <div class="login-form">
+    <input type="email" id="login-email" class="login-input" placeholder="Email"
+           autocomplete="username" inputmode="email" onkeydown="handleLoginKey(event)" />
+    <input type="password" id="login-password" class="login-input" placeholder="Password"
+           autocomplete="current-password" onkeydown="handleLoginKey(event)" />
+    <button id="login-btn" class="login-btn" onclick="login()">Sign in</button>
+    <p id="login-error" class="login-error"></p>
+    <p class="login-note">Private to the Whittington family. Ask Brandon for an account.</p>
+  </div>
+</div>
+
+<!-- ── User Select ────────────────────────────────────────────────── -->
+<div id="screen-user-select" style="display:none;">
+  <svg class="compass-bg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="100" cy="100" r="95" fill="none" stroke="#F5F0E8" stroke-width="1"/>
+    <circle cx="100" cy="100" r="75" fill="none" stroke="#F5F0E8" stroke-width="0.5"/>
+    <circle cx="100" cy="100" r="55" fill="none" stroke="#F5F0E8" stroke-width="0.5"/>
+    <line x1="100" y1="5" x2="100" y2="195" stroke="#F5F0E8" stroke-width="0.5"/>
+    <line x1="5" y1="100" x2="195" y2="100" stroke="#F5F0E8" stroke-width="0.5"/>
+    <line x1="32" y1="32" x2="168" y2="168" stroke="#F5F0E8" stroke-width="0.3"/>
+    <line x1="168" y1="32" x2="32" y2="168" stroke="#F5F0E8" stroke-width="0.3"/>
+    <polygon points="100,10 94,100 100,90 106,100" fill="#F5F0E8"/>
+    <polygon points="100,190 94,100 100,110 106,100" fill="#F5F0E8" opacity="0.4"/>
     <text x="100" y="28" text-anchor="middle" fill="#F5F0E8" font-size="12" font-family="Inter">N</text>
     <text x="100" y="182" text-anchor="middle" fill="#F5F0E8" font-size="10" font-family="Inter" opacity="0.5">S</text>
     <text x="178" y="105" text-anchor="middle" fill="#F5F0E8" font-size="10" font-family="Inter" opacity="0.5">E</text>
@@ -1195,13 +1373,13 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
   <p class="app-subtitle">Southern Indiana Field Guide</p>
   <p class="who-label">Who's exploring?</p>
   <div class="user-btns">
-    <button class="user-btn brandon" onclick="selectUser(&#39;Brandon&#39;)">
+    <button class="user-btn brandon" onclick="selectUser('Brandon')">
       <span class="user-icon">🌿</span>Brandon
     </button>
-    <button class="user-btn scott" onclick="selectUser(&#39;Scott&#39;)">
+    <button class="user-btn scott" onclick="selectUser('Scott')">
       <span class="user-icon">🔧</span>Scott
     </button>
-    <button class="user-btn wendy" onclick="selectUser(&#39;Wendy&#39;)">
+    <button class="user-btn wendy" onclick="selectUser('Wendy')">
       <span class="user-icon">🌸</span>Wendy
     </button>
   </div>
@@ -1212,39 +1390,43 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 
   <div class="top-bar">
     <span class="top-bar-title">Whittington — What Is It?</span>
-    <span class="user-badge" id="current-user-label"></span>
+    <div class="top-bar-right">
+      <span class="user-badge" id="current-user-label"></span>
+      <button class="signout-btn" onclick="logout()" title="Sign out">Sign out</button>
+    </div>
   </div>
 
   <div class="tab-bar">
-    <button class="tab-btn active" id="tab-camera" onclick="switchTab(&#39;camera&#39;)">📷 Identify</button>
-    <button class="tab-btn" id="tab-feed" onclick="switchTab(&#39;feed&#39;)">📋 Feed</button>
-    <button class="tab-btn" id="tab-map" onclick="switchTab(&#39;map&#39;)">🗺 Map</button>
+    <button class="tab-btn active" id="tab-camera" onclick="switchTab('camera')">📷 Identify</button>
+    <button class="tab-btn" id="tab-feed" onclick="switchTab('feed')">📋 Feed</button>
+    <button class="tab-btn" id="tab-map" onclick="switchTab('map')">🗺 Map</button>
   </div>
 
   <!-- Camera Panel -->
   <div class="tab-panel active" id="panel-camera">
 
     <div id="preview-section" style="display:none;">
-      <img id="preview-img" src="file:///C:/Users/Brandon/Downloads/whittington-what-is-it_3.html" alt="Selected photo">
+      <img id="preview-img" src="" alt="Selected photo" />
       <button class="new-photo-btn" onclick="newPhoto()">↩ Choose different photo</button>
     </div>
 
     <div class="camera-zone" onclick="triggerCamera()" id="camera-zone-trigger">
       <svg class="camera-compass" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="100" cy="100" r="95" fill="none" stroke="#F5F0E8" stroke-width="1.5"></circle>
-        <circle cx="100" cy="100" r="70" fill="none" stroke="#F5F0E8" stroke-width="0.8"></circle>
-        <line x1="100" y1="5" x2="100" y2="195" stroke="#F5F0E8" stroke-width="1"></line>
-        <line x1="5" y1="100" x2="195" y2="100" stroke="#F5F0E8" stroke-width="1"></line>
-        <line x1="32" y1="32" x2="168" y2="168" stroke="#F5F0E8" stroke-width="0.5"></line>
-        <line x1="168" y1="32" x2="32" y2="168" stroke="#F5F0E8" stroke-width="0.5"></line>
-        <polygon points="100,10 94,100 100,85 106,100" fill="#7BA05B"></polygon>
-        <polygon points="100,190 94,100 100,115 106,100" fill="#F5F0E8" opacity="0.3"></polygon>
+        <circle cx="100" cy="100" r="95" fill="none" stroke="#F5F0E8" stroke-width="1.5"/>
+        <circle cx="100" cy="100" r="70" fill="none" stroke="#F5F0E8" stroke-width="0.8"/>
+        <line x1="100" y1="5" x2="100" y2="195" stroke="#F5F0E8" stroke-width="1"/>
+        <line x1="5" y1="100" x2="195" y2="100" stroke="#F5F0E8" stroke-width="1"/>
+        <line x1="32" y1="32" x2="168" y2="168" stroke="#F5F0E8" stroke-width="0.5"/>
+        <line x1="168" y1="32" x2="32" y2="168" stroke="#F5F0E8" stroke-width="0.5"/>
+        <polygon points="100,10 94,100 100,85 106,100" fill="#7BA05B"/>
+        <polygon points="100,190 94,100 100,115 106,100" fill="#F5F0E8" opacity="0.3"/>
       </svg>
       <span class="camera-icon">📷</span>
       <span class="camera-hint">Tap to take or choose a photo</span>
     </div>
 
-    <input type="file" id="camera-input" accept="image/*" capture="environment" onchange="handleImageSelect(this)">
+    <input type="file" id="camera-input" accept="image/*" capture="environment"
+           onchange="handleImageSelect(this)" />
 
     <button id="identify-btn" onclick="identify()">🔍 Identify</button>
 
@@ -1257,7 +1439,8 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 
     <div id="followup-section" style="display:none;">
       <div class="followup-row">
-        <input type="text" id="followup-input" placeholder="Ask a follow-up question..." onkeydown="handleFollowupKey(event)">
+        <input type="text" id="followup-input" placeholder="Ask a follow-up question..."
+               onkeydown="handleFollowupKey(event)" />
         <button id="followup-btn" onclick="sendFollowup()">Ask</button>
       </div>
     </div>
@@ -1267,9 +1450,9 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
   <!-- Feed Panel -->
   <div class="tab-panel" id="panel-feed">
     <div class="feed-sub-tabs">
-      <button class="feed-tab-btn active" id="feed-tab-brandon" onclick="switchFeedUser(&#39;brandon&#39;)">🌿 Brandon</button>
-      <button class="feed-tab-btn" id="feed-tab-scott" onclick="switchFeedUser(&#39;scott&#39;)">🔧 Scott</button>
-      <button class="feed-tab-btn" id="feed-tab-wendy" onclick="switchFeedUser(&#39;wendy&#39;)">🌸 Wendy</button>
+      <button class="feed-tab-btn active" id="feed-tab-brandon" onclick="switchFeedUser('brandon')">🌿 Brandon</button>
+      <button class="feed-tab-btn" id="feed-tab-scott" onclick="switchFeedUser('scott')">🔧 Scott</button>
+      <button class="feed-tab-btn" id="feed-tab-wendy" onclick="switchFeedUser('wendy')">🌸 Wendy</button>
     </div>
     <div class="feed-user-panel active" id="feed-brandon">
       <p class="feed-empty">Loading...</p>
@@ -1296,30 +1479,5 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 
 <div id="toast"></div>
 
-<script>
-  // Handle user badge styling dynamically
-  const origSelectUser = window.selectUser;
-  window.selectUser = function(user) {
-    origSelectUser(user);
-    const badge = document.getElementById('current-user-label');
-    badge.className = 'user-badge ' + user.toLowerCase();
-  };
-
-  // Hide camera zone when preview is shown
-  const origHandleImageSelect = window.handleImageSelect;
-  window.handleImageSelect = function(input) {
-    origHandleImageSelect(input);
-    const cz = document.getElementById('camera-zone-trigger');
-    if (cz) cz.style.setProperty('display', 'none', 'important');
-  };
-
-  const origNewPhoto = window.newPhoto;
-  window.newPhoto = function() {
-    origNewPhoto();
-    document.getElementById('camera-zone-trigger').style.display = 'flex';
-  };
-</script>
-
-
-
-</body></html>
+</body>
+</html>
