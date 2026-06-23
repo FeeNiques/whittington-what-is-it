@@ -10,7 +10,7 @@
 <!-- Firebase -->
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-  import { getFirestore, collection, addDoc, getDocs, query, orderBy, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+  import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, query, orderBy, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
   import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
   // Photos are shrunk in-browser and stored directly in Firestore (no Cloud Storage / Blaze plan needed).
 
@@ -33,7 +33,7 @@
   const auth = getAuth(app);
 
   // Build marker — check the browser console (F12) to confirm which version is live.
-  console.log('%cWhittington — What Is It?  build 2026-06-23d (feed + identify scroll fix)', 'color:#7BA05B;font-weight:bold');
+  console.log('%cWhittington — What Is It?  build 2026-06-23g (copy tweaks + section rename)', 'color:#7BA05B;font-weight:bold');
 
   // ── System prompt ────────────────────────────────────────────────────────────
   const SYSTEM_PROMPT = `You are a knowledgeable naturalist and field guide assistant for the Whittington family — a curious, outdoorsy family from Southern Indiana with bird feeders, wooded property, and a love of nature. One member works on small engines. They travel and explore beyond home regularly.
@@ -60,7 +60,7 @@ RESPONSE FORMAT — always use this exact structure:
 
 **Local Notes:** [1-2 sentences about this species or object specifically in the region where the photo was taken — seasonality, local abundance, any quirks relevant to that area. If historical context was provided and is interesting, you may mention it briefly here instead.]
 
-**Ask Me More:** [Share one additional surprising or little-known fact about this subject that did not fit above, then suggest one specific thing to look for or listen for next time they encounter it. Do not ask the user any questions about their intentions or what they want to do with the information.]
+**Interesting Point(s):** [Share one additional surprising or little-known fact about this subject that did not fit above, then suggest one specific thing to look for or listen for next time they encounter it. Do not ask the user any questions about their intentions or what they want to do with the information.]
 
 SUBJECT AREAS — you are knowledgeable about all of these:
 - Birds (feeder birds, woodland species, raptors, waterfowl — regionally appropriate to the location)
@@ -267,12 +267,14 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
   }
 
   // ── Save sighting to Firestore ────────────────────────────────────────────────
-  async function saveSighting(imageUrl, aiResponse, location, regionLabel) {
+  async function saveSighting(imageUrl, aiResponse, location, regionLabel, userNote) {
     const coordLabel = location ? `${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}` : null;
-    const doc = {
+    const sighting = {
       user: currentUser,
       authUid: auth.currentUser?.uid || null,
       authEmail: auth.currentUser?.email || null,
+      visibility: 'private',          // new sightings start private; owner shares explicitly
+      userNote: userNote || null,     // optional context the user typed before identifying
       imageUrl,
       aiResponse,
       location: location || null,
@@ -280,8 +282,8 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
       locationLabel: regionLabel || coordLabel || 'Location unavailable',
       coordLabel: coordLabel || null
     };
-    await addDoc(collection(db, 'sightings'), doc);
-    return doc;
+    await addDoc(collection(db, 'sightings'), sighting);
+    return sighting;
   }
 
   // ── Load feed ─────────────────────────────────────────────────────────────────
@@ -296,25 +298,31 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     });
   }
 
-  function renderFeed() {
-    const brandon = allSightings.filter(s => s.user === 'Brandon');
-    const scott = allSightings.filter(s => s.user === 'Scott');
-    const wendy = allSightings.filter(s => s.user === 'Wendy');
+  // A sighting counts as shared unless explicitly private (legacy entries with no
+  // visibility field stay visible to the family, since they were already shared).
+  const isShared = (s) => s.visibility !== 'private';
 
-    [['Brandon', brandon], ['Scott', scott], ['Wendy', wendy]].forEach(([user, list]) => {
+  function renderFeed() {
+    ['Brandon', 'Scott', 'Wendy'].forEach((user) => {
       const container = document.getElementById(`feed-${user.toLowerCase()}`);
       if (!container) return;
+      const owned = (user === currentUser);
+      // Your own tab shows everything you posted; others' tabs show only what they shared.
+      let list = allSightings.filter(s => s.user === user);
+      if (!owned) list = list.filter(isShared);
+
       container.innerHTML = list.length === 0
-        ? '<p class="feed-empty">Nothing shared yet.</p>'
-        : list.map(s => feedCard(s)).join('');
+        ? `<p class="feed-empty">${owned ? "Nothing here yet. Tap 📷 Identify to add your first find. New finds start private — tap the banner on a card to share it with the family." : 'Nothing shared yet.'}</p>`
+        : list.map(s => feedCard(s, owned)).join('');
     });
   }
 
-  function feedCard(s) {
+  function feedCard(s, owned = false) {
     const date = new Date(s.timestamp).toLocaleDateString('en-US', {
       month: 'short', day: 'numeric', year: 'numeric',
       hour: 'numeric', minute: '2-digit'
     });
+    const shared = isShared(s);
     const firstLine = (s.aiResponse?.split('\n')[0] || 'View identification').replace(/\*\*/g, '');
     const mapsUrl = s.location
       ? `https://maps.apple.com/?ll=${s.location.lat},${s.location.lng}&z=15`
@@ -327,11 +335,13 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 
     return `
     <div class="feed-card">
+      ${owned ? `<button class="vis-toggle-btn ${shared ? 'shared' : 'private'}" onclick="toggleVisibility('${s.id}', ${shared})">${shared ? '👥 Shared with family · tap to make private' : '🔒 Private · tap to share with family'}</button>` : ''}
       <img class="feed-img" src="${s.imageUrl}" alt="Sighting" loading="lazy" />
       <div class="feed-meta">
         <span class="feed-date">${date}</span>
         ${mapsUrl ? `<a class="feed-loc" href="${mapsUrl}" target="_blank">📍 ${s.locationLabel}</a>` : `<span class="feed-loc-plain">📍 ${s.locationLabel}</span>`}
       </div>
+      ${s.userNote ? `<div class="feed-note">📝 ${escapeHtml(s.userNote)}</div>` : ''}
       <div class="feed-response collapsed" id="resp-${s.id}">
         <div class="feed-preview">${firstLine}</div>
         <div class="feed-full">${formatResponse(s.aiResponse)}</div>
@@ -368,11 +378,28 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     }
   };
 
+  // Flip a sighting between private (owner only) and shared (whole family).
+  // onSnapshot re-renders the feed automatically after the write.
+  window.toggleVisibility = async function(id, currentlyShared) {
+    try {
+      await updateDoc(doc(db, 'sightings', id), { visibility: currentlyShared ? 'private' : 'shared' });
+      showToast(currentlyShared ? 'Set to private' : 'Shared with family');
+    } catch (err) {
+      console.error('Visibility toggle error:', err);
+      showToast('Could not update sharing', true);
+    }
+  };
+
   function formatResponse(text) {
     if (!text) return '';
     return text
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/\n/g, '<br>');
+  }
+
+  // Escape user-entered text before inserting into innerHTML (notes are free text)
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
   // ── Comments ─────────────────────────────────────────────────────────────────
@@ -534,6 +561,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
       conversationHistory = [];
 
       document.getElementById('preview-img').src = dataUrl;
+      document.getElementById('photo-note').value = '';   // fresh note for each new photo
       document.getElementById('preview-section').style.display = 'block';
       document.getElementById('response-section').style.display = 'none';
       document.getElementById('followup-section').style.display = 'none';
@@ -573,8 +601,13 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
         ]);
       }
 
-      // Build enriched prompt with location and history context
+      // Build enriched prompt with user context, location, and history
+      const photoNote = document.getElementById('photo-note').value.trim();
+
       let prompt = 'Please identify what is in this photo.';
+      if (photoNote) {
+        prompt += `\n\nThe person who took the photo adds this context: ${photoNote}`;
+      }
       if (regionLabel) {
         prompt += `\n\nLocation where this photo was taken: ${regionLabel}.`;
       }
@@ -591,7 +624,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
       // Auto-save to Firestore (photo shrunk and stored inline — no Cloud Storage)
       try {
         const storedImage = await shrinkImage(`data:${currentImageMime};base64,${currentImageBase64}`);
-        await saveSighting(storedImage, response, currentLocation, regionLabel);
+        await saveSighting(storedImage, response, currentLocation, regionLabel, photoNote);
         showToast('Saved to your feed');
       } catch (saveErr) {
         console.error('Save error:', saveErr);
@@ -972,6 +1005,23 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     display: block;
   }
 
+  .photo-note {
+    width: 100%;
+    margin-top: 10px;
+    background: var(--card-bg);
+    border: 1px solid rgba(245,240,232,0.15);
+    border-radius: 12px;
+    color: var(--cream);
+    font-family: 'Inter', sans-serif;
+    font-size: 0.92rem;
+    line-height: 1.4;
+    padding: 12px 14px;
+    outline: none;
+    resize: vertical;
+  }
+  .photo-note:focus { border-color: var(--green); }
+  .photo-note::placeholder { color: var(--muted); }
+
   .new-photo-btn {
     background: none;
     border: 1px solid rgba(245,240,232,0.2);
@@ -1135,6 +1185,21 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     flex-shrink: 0;   /* keep natural height so the column overflows and scrolls instead of squishing cards */
   }
 
+  .vis-toggle-btn {
+    width: 100%;
+    border: none;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 9px 12px;
+    text-align: center;
+    border-bottom: 1px solid rgba(245,240,232,0.07);
+  }
+  .vis-toggle-btn.private { background: rgba(196,135,58,0.18); color: var(--rust); }
+  .vis-toggle-btn.shared  { background: rgba(123,160,91,0.16); color: var(--green); }
+  .vis-toggle-btn:active  { opacity: 0.75; }
+
   .feed-img {
     width: 100%;
     height: 200px;
@@ -1152,6 +1217,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
   .feed-date { font-size: 0.78rem; color: var(--muted); }
   .feed-loc { font-size: 0.78rem; color: var(--green); text-decoration: none; }
   .feed-loc-plain { font-size: 0.78rem; color: var(--muted); }
+  .feed-note { padding: 4px 14px 0; font-size: 0.85rem; font-style: italic; color: var(--cream); opacity: 0.9; }
 
   .feed-response {
     padding: 0 14px;
@@ -1414,6 +1480,8 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 
     <div id="preview-section" style="display:none;">
       <img id="preview-img" src="" alt="Selected photo" />
+      <textarea id="photo-note" class="photo-note" rows="2"
+        placeholder="Add details to help identify it — where you are, size, what it's near, anything blurry (optional)"></textarea>
       <button class="new-photo-btn" onclick="newPhoto()">↩ Choose different photo</button>
     </div>
 
@@ -1446,7 +1514,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 
     <div id="followup-section" style="display:none;">
       <div class="followup-row">
-        <input type="text" id="followup-input" placeholder="Ask a follow-up question..."
+        <input type="text" id="followup-input" placeholder="Ask a follow-up about this photo…"
                onkeydown="handleFollowupKey(event)" />
         <button id="followup-btn" onclick="sendFollowup()">Ask</button>
       </div>
