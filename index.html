@@ -40,7 +40,7 @@
   const auth = getAuth(app);
 
   // Build marker — check the browser console (F12) to confirm which version is live.
-  console.log('%cWhittington — What Is It?  build 2026-06-23h (PWA icon + manifest)', 'color:#7BA05B;font-weight:bold');
+  console.log('%cWhittington — What Is It?  build 2026-06-23i (config-driven users + Erin)', 'color:#7BA05B;font-weight:bold');
 
   // ── System prompt ────────────────────────────────────────────────────────────
   const SYSTEM_PROMPT = `You are a knowledgeable naturalist and field guide assistant for the Whittington family — a curious, outdoorsy family from Southern Indiana with bird feeders, wooded property, and a love of nature. One member works on small engines. They travel and explore beyond home regularly.
@@ -310,7 +310,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
   const isShared = (s) => s.visibility !== 'private';
 
   function renderFeed() {
-    ['Brandon', 'Scott', 'Wendy'].forEach((user) => {
+    USERS.map(u => u.name).forEach((user) => {
       const container = document.getElementById(`feed-${user.toLowerCase()}`);
       if (!container) return;
       const owned = (user === currentUser);
@@ -335,7 +335,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
       ? `https://maps.apple.com/?ll=${s.location.lat},${s.location.lng}&z=15`
       : null;
 
-    const tagHint = Object.keys({Brandon:1,Scott:1,Wendy:1})
+    const tagHint = USERS.map(u => u.name)
       .filter(n => n !== currentUser)
       .map(n => `@${n}`)
       .join(', ');
@@ -409,19 +409,27 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
-  // ── Comments ─────────────────────────────────────────────────────────────────
-  const USER_COLORS = {
-    Brandon: '#7BA05B',
-    Scott: '#C4873A',
-    Wendy: '#8B5E8B'
-  };
+  // ── Family members ───────────────────────────────────────────────────────────
+  // ADD A PERSON HERE. Then (1) create their account in Firebase Authentication and
+  // (2) add their email to the Firestore rules allow-list. Everything else — the
+  // "who's exploring?" picker, feed tabs, colors, @-tags, and map pins — is built
+  // from this list automatically.
+  const USERS = [
+    { name: 'Brandon', email: 'bwhittington2013@gmail.com', color: '#7BA05B', text: '#1C2B1A', icon: '🌿' },
+    { name: 'Scott',   email: 'scottwhittin@hotmail.com',   color: '#C4873A', text: '#F5F0E8', icon: '🔧' },
+    { name: 'Wendy',   email: 'wendywhittin@hotmail.com',   color: '#8B5E8B', text: '#F5F0E8', icon: '🌸' },
+    { name: 'Erin',    email: 'ewhittington127@gmail.com',  color: '#5B8AA0', text: '#F5F0E8', icon: '🦋' },
+  ];
+  const userByName = Object.fromEntries(USERS.map(u => [u.name, u]));
+  const userColor = (name) => (userByName[name] ? userByName[name].color : '#9B9B8A');
+  const userText  = (name) => (userByName[name] ? userByName[name].text  : '#F5F0E8');
 
+  // ── Comments ─────────────────────────────────────────────────────────────────
   function formatComment(text) {
-    // Render @Name tags as colored badges
-    return text.replace(/@(Brandon|Scott|Wendy)/g, (match, name) => {
-      const color = USER_COLORS[name] || '#9B9B8A';
-      return `<span style="background:${color};color:${name === 'Brandon' ? '#1C2B1A' : '#F5F0E8'};padding:1px 7px;border-radius:10px;font-size:0.82rem;font-weight:600;">${match}</span>`;
-    });
+    // Render @Name tags as colored badges (names come from USERS)
+    const re = new RegExp('@(' + USERS.map(u => u.name).join('|') + ')', 'g');
+    return text.replace(re, (match, name) =>
+      `<span style="background:${userColor(name)};color:${userText(name)};padding:1px 7px;border-radius:10px;font-size:0.82rem;font-weight:600;">${match}</span>`);
   }
 
   async function loadComments(sightingId) {
@@ -445,8 +453,8 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
       return;
     }
     container.innerHTML = comments.map(c => {
-      const color = USER_COLORS[c.user] || '#9B9B8A';
-      const textColor = c.user === 'Brandon' ? '#1C2B1A' : '#F5F0E8';
+      const color = userColor(c.user);
+      const textColor = userText(c.user);
       const time = c.timestamp?.toDate
         ? c.timestamp.toDate().toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
         : 'just now';
@@ -512,7 +520,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 
     const withLocation = allSightings.filter(s => s.location);
     withLocation.forEach(s => {
-      const color = s.user === 'Brandon' ? '#7BA05B' : s.user === 'Scott' ? '#C4873A' : '#8B5E8B';
+      const color = userColor(s.user);
       const icon = L.divIcon({
         html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #F5F0E8;box-shadow:0 1px 4px rgba(0,0,0,0.4)"></div>`,
         className: '',
@@ -694,7 +702,9 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     document.getElementById('screen-main').style.display = 'flex';
     const badge = document.getElementById('current-user-label');
     badge.textContent = user;
-    badge.className = 'user-badge ' + user.toLowerCase();   // (folded in from old bottom script)
+    badge.className = 'user-badge';
+    badge.style.background = userColor(user);   // color from USERS (no per-user CSS class needed)
+    badge.style.color = userText(user);
     loadFeed();
   };
 
@@ -711,6 +721,25 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
     // Restore the dashed camera zone (folded in from old bottom script)
     document.getElementById('camera-zone-trigger').style.display = 'flex';
   };
+
+  // ── Build all per-user UI from the USERS list (picker, feed tabs + panels, map legend) ──
+  (function buildUserUI() {
+    const btns = document.getElementById('user-btns');
+    if (btns) btns.innerHTML = USERS.map(u =>
+      `<button class="user-btn" style="background:${u.color};color:${u.text}" onclick="selectUser('${u.name}')"><span class="user-icon">${u.icon}</span>${u.name}</button>`).join('');
+
+    const subtabs = document.getElementById('feed-sub-tabs');
+    if (subtabs) subtabs.innerHTML = USERS.map((u, i) =>
+      `<button class="feed-tab-btn${i === 0 ? ' active' : ''}" id="feed-tab-${u.name.toLowerCase()}" onclick="switchFeedUser('${u.name.toLowerCase()}')">${u.icon} ${u.name}</button>`).join('');
+
+    const panelFeed = document.getElementById('panel-feed');
+    if (panelFeed) panelFeed.insertAdjacentHTML('beforeend', USERS.map((u, i) =>
+      `<div class="feed-user-panel${i === 0 ? ' active' : ''}" id="feed-${u.name.toLowerCase()}"><p class="feed-empty">Loading…</p></div>`).join(''));
+
+    const legend = document.getElementById('map-legend');
+    if (legend) legend.innerHTML = USERS.map(u =>
+      `<span><span class="legend-dot" style="background:${u.color}"></span>${u.name}</span>`).join('');
+  })();
 
 </script>
 
@@ -1452,17 +1481,7 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
   <h1 class="app-title">Whittington<br>What Is It?</h1>
   <p class="app-subtitle">Southern Indiana Field Guide</p>
   <p class="who-label">Who's exploring?</p>
-  <div class="user-btns">
-    <button class="user-btn brandon" onclick="selectUser('Brandon')">
-      <span class="user-icon">🌿</span>Brandon
-    </button>
-    <button class="user-btn scott" onclick="selectUser('Scott')">
-      <span class="user-icon">🔧</span>Scott
-    </button>
-    <button class="user-btn wendy" onclick="selectUser('Wendy')">
-      <span class="user-icon">🌸</span>Wendy
-    </button>
-  </div>
+  <div class="user-btns" id="user-btns"><!-- buttons generated from USERS --></div>
 </div>
 
 <!-- ── Main App ───────────────────────────────────────────────────── -->
@@ -1531,30 +1550,14 @@ TONE: Warm, direct, knowledgeable — like a smart neighbor who happens to know 
 
   <!-- Feed Panel -->
   <div class="tab-panel" id="panel-feed">
-    <div class="feed-sub-tabs">
-      <button class="feed-tab-btn active" id="feed-tab-brandon" onclick="switchFeedUser('brandon')">🌿 Brandon</button>
-      <button class="feed-tab-btn" id="feed-tab-scott" onclick="switchFeedUser('scott')">🔧 Scott</button>
-      <button class="feed-tab-btn" id="feed-tab-wendy" onclick="switchFeedUser('wendy')">🌸 Wendy</button>
-    </div>
-    <div class="feed-user-panel active" id="feed-brandon">
-      <p class="feed-empty">Loading...</p>
-    </div>
-    <div class="feed-user-panel" id="feed-scott">
-      <p class="feed-empty">Loading...</p>
-    </div>
-    <div class="feed-user-panel" id="feed-wendy">
-      <p class="feed-empty">Loading...</p>
-    </div>
+    <div class="feed-sub-tabs" id="feed-sub-tabs"><!-- tabs generated from USERS --></div>
+    <!-- .feed-user-panel divs are appended here from USERS at startup -->
   </div>
 
   <!-- Map Panel -->
   <div class="tab-panel" id="panel-map">
     <div id="map-container"></div>
-    <div class="map-legend">
-      <span><span class="legend-dot" style="background:#7BA05B"></span>Brandon</span>
-      <span><span class="legend-dot" style="background:#C4873A"></span>Scott</span>
-      <span><span class="legend-dot" style="background:#8B5E8B"></span>Wendy</span>
-    </div>
+    <div class="map-legend" id="map-legend"><!-- legend generated from USERS --></div>
   </div>
 
 </div>
